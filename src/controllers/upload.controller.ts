@@ -1,7 +1,7 @@
-import UploadService from "@/services/upload.service";
+import type UploadService from "@/services/upload.service";
 
 export default class UploadController {
-  private uploadService = new UploadService();
+  constructor(private uploadService: UploadService) {}
 
   initUpload = async ({ body }: any) => {
     return this.uploadService.initUpload(body);

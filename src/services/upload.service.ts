@@ -1,15 +1,16 @@
-import UploadRepository from "@/repositories/upload.repository";
-import PartRepository from "@/repositories/part.repository";
+import type UploadRepository from "@/repositories/upload.repository";
+import type PartRepository from "@/repositories/part.repository";
 import type StorageStrategy from "@/strategies/storage.strategy";
-import { S3StorageStrategy } from "@/strategies/s3.storage";
 import { redisLock } from "@/redis/redislock";
 import { randomUUID } from "crypto";
 import { logger } from "@/utils/logger";
 
 export default class UploadService {
-  private uploadRepo = new UploadRepository();
-  private partRepo = new PartRepository();
-  private storage: StorageStrategy = new S3StorageStrategy();
+  constructor(
+    private uploadRepo: UploadRepository,
+    private partRepo: PartRepository,
+    private storage: StorageStrategy
+  ) {}
 
   // async initUpload(data: any) {
   //     const uploadId = randomUUID();

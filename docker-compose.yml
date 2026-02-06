@@ -64,6 +64,18 @@ services:
     ports:
       - "6379:6379"
 
+  # -----------------------------------------------------
+  # 🔴 RedisInsight (Redis UI Dashboard)
+  # -----------------------------------------------------
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: upload_redisinsight
+    ports:
+      - "5540:5540"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
   minio:
     image: minio/minio
     container_name: upload_minio

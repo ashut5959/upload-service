@@ -1,10 +1,10 @@
-import { getDb } from "@/clients/db.client";
+import type { DbClient } from "@/repositories/upload.repository";
 import { uploadParts } from "@/db/schema";
 import { randomUUID } from "crypto";
 import { eq, sql } from "drizzle-orm";
 
 export default class PartRepository {
-  private db = getDb();
+  constructor(private db: DbClient) {}
 
   async savePart(
     uploadId: string,

@@ -1,9 +1,11 @@
-import { getDb } from "@/clients/db.client";
+import type { getDb } from "@/clients/db.client";
 import { uploads } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 
+export type DbClient = ReturnType<typeof getDb>;
+
 export default class UploadRepository {
-  private db = getDb();
+  constructor(private db: DbClient) {}
 
   async createUpload(data: any) {
     return this.db.insert(uploads).values(data).returning();
