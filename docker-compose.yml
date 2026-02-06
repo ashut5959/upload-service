@@ -1,0 +1,168 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: upload_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: upload_service
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period:
+        10s
+
+        # -----------------------------------------------------
+  # 🟢 PgBouncer (Connection Pooler)
+  # -----------------------------------------------------
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: upload_pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:6432"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: password
+      DB_NAME: upload_service
+
+      AUTH_TYPE: md5
+      POOL_MODE: transaction # 🔑 best for microservices
+      MAX_CLIENT_CONN: 500
+      DEFAULT_POOL_SIZE: 50
+      RESERVE_POOL_SIZE: 20
+      SERVER_IDLE_TIMEOUT: 60
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: upload_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: password
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  redis:
+    image: redis:7
+    container_name: upload_redis
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio
+    container_name: upload_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -----------------------------------------------------
+  # 🟡 Elasticsearch Service
+  # -----------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: upload_elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # -----------------------------------------------------
+  # 🟣 Kibana Service
+  # -----------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: upload_kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+  # -----------------------------------------------------
+  # -----------------------------------------------------
+  # 🔵 Bun Backend Service
+  # -----------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: upload_backend
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+
+      # 🔑 Database (via PgBouncer)
+      DATABASE_URL: postgres://postgres:password@pgbouncer:6432/upload_service
+
+      # 🔴 Redis
+      REDIS_URL: redis://redis:6379
+
+      # 🪣 MinIO (S3 compatible)
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: uploads
+      S3_REGION: us-east-1
+      ELASTICSEARCH_URL: http://localhost:9200
+      ELASTIC_USERNAME: elastic
+      ELASTIC_PASSWORD: changeme
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  minio_data:
+  elastic_data:
