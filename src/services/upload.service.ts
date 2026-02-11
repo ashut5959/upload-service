@@ -1,6 +1,12 @@
 import type UploadRepository from "@/repositories/upload.repository";
 import type PartRepository from "@/repositories/part.repository";
 import type StorageStrategy from "@/strategies/storage.strategy";
+import type {
+  InitUploadRequestDto,
+  InitUploadResponseDto,
+  PartCompleteRequestDto,
+  PartCompleteResponseDto,
+} from "@/dtos/upload.dto";
 import { redisLock } from "@/redis/redislock";
 import { randomUUID } from "crypto";
 import { logger } from "@/utils/logger";
@@ -59,7 +65,7 @@ export default class UploadService {
   //     };
   // }
 
-  async initUpload(data: any) {
+  async initUpload(data: InitUploadRequestDto): Promise<InitUploadResponseDto> {
     // 1️⃣ RESUME PATH
     if (data.uploadId) {
       const existing = await this.uploadRepo.getUpload(data.uploadId);
@@ -178,14 +184,18 @@ export default class UploadService {
     return { url };
   }
 
-  async partComplete(uploadId: string, data: any) {
+  async partComplete(
+    uploadId: string,
+    data: PartCompleteRequestDto
+  ): Promise<PartCompleteResponseDto> {
     await this.partRepo.savePart(uploadId, data.PartNumber, data.ETag);
     await this.uploadRepo.incrementUploadedParts(uploadId);
 
     const uploadedParts = await this.uploadRepo.getUpload(uploadId);
     if (!uploadedParts) throw new Error("Upload not found");
 
-    console.log({
+    logger.debug({
+      uploadId,
       uploadedParts: uploadedParts.uploadedParts,
       totalParts: uploadedParts.totalParts,
     });
@@ -196,7 +206,7 @@ export default class UploadService {
 
     return {
       message: "Part uploaded successfully",
-      uploadedParts: uploadedParts.uploadedParts,
+      uploadedParts: uploadedParts.uploadedParts ?? 0,
       totalParts: uploadedParts.totalParts,
     };
   }
@@ -256,7 +266,7 @@ export default class UploadService {
       // await this.eventRepo.log(uploadId, "UPLOAD_COMPLETED", { result });
 
       return {
-        status: "completed",
+        status: "completed" as const,
         uploadId,
         finalKey: `${upload.s3KeyPrefix}${upload.filename}`,
         etag: result.ETag,
@@ -270,15 +280,15 @@ export default class UploadService {
       const upload = await this.uploadRepo.getUpload(uploadId);
       if (!upload) {
         // idempotent: if no upload, treat as already canceled
-        return { status: "not_found", uploadId };
+        return { status: "not_found" as const, uploadId };
       }
 
       // If already canceled or completed, return early
       if (upload.state === "CANCELED") {
-        return { status: "already_canceled", uploadId };
+        return { status: "already_canceled" as const, uploadId };
       }
       if (upload.state === "COMPLETED") {
-        return { status: "already_completed", uploadId };
+        return { status: "already_completed" as const, uploadId };
       }
 
       // 2. If S3 upload session exists, abort it
@@ -290,22 +300,24 @@ export default class UploadService {
             uploadId: upload.s3UploadId,
           });
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         // log the error, mark the upload with lastError but keep going with DB update
         // so system remains in a consistent state; you can also rethrow to fail the abort.
-        console.error("S3 abort failed for upload", uploadId, err);
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.error({ uploadId, errorMessage }, "S3 abort failed for upload");
         await this.uploadRepo.markCanceled(uploadId, {
-          lastError: String(err?.message ?? err),
+          lastError: errorMessage,
         });
         // Option: rethrow if you want the caller to retry
-        return { status: "s3_abort_failed", uploadId, error: String(err?.message ?? err) };
+        return { status: "s3_abort_failed" as const, uploadId, error: errorMessage };
       }
 
       // 3. Delete parts rows (optional)
       try {
         await this.partRepo.deleteParts(uploadId);
-      } catch (err: any) {
-        console.warn("Failed to delete part rows for", uploadId, err);
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.warn({ uploadId, errorMessage }, "Failed to delete part rows for");
         // non-fatal: continue
       }
 
@@ -315,7 +327,7 @@ export default class UploadService {
       // 5. (Optional) emit event to events table or push notification
       // await this.eventRepo.log(uploadId, "UPLOAD_CANCELED", { by: "uploader" });
 
-      return { status: "canceled", uploadId };
+      return { status: "canceled" as const, uploadId };
     });
   }
 }

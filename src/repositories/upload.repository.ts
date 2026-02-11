@@ -4,10 +4,36 @@ import { eq, sql } from "drizzle-orm";
 
 export type DbClient = ReturnType<typeof getDb>;
 
+export interface CreateUploadData {
+  id: string;
+  uploadedById: string;
+  uploadedByType: string;
+  tenantId: string | null;
+  filename: string;
+  contentType: string;
+  size: number;
+  chunkSize: number;
+  totalParts: number;
+  s3Bucket: string;
+  s3KeyPrefix: string;
+  s3UploadId: string;
+  state: "INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED";
+  metadata: Record<string, unknown>;
+}
+
+export interface MarkCompletedData {
+  etag: string;
+  finalS3Key: string;
+}
+
+export interface MarkCanceledData {
+  lastError?: string;
+}
+
 export default class UploadRepository {
   constructor(private db: DbClient) {}
 
-  async createUpload(data: any) {
+  async createUpload(data: CreateUploadData) {
     return this.db.insert(uploads).values(data).returning();
   }
 
@@ -31,7 +57,7 @@ export default class UploadRepository {
       .where(eq(uploads.id, uploadId));
   }
 
-  async markCompleted(uploadId: string, data: { etag: string; finalS3Key: string }) {
+  async markCompleted(uploadId: string, data: MarkCompletedData) {
     return this.db
       .update(uploads)
       .set({
@@ -43,8 +69,8 @@ export default class UploadRepository {
       .where(eq(uploads.id, uploadId));
   }
 
-  async markCanceled(uploadId: string, data?: { lastError?: string }) {
-    const setObj: any = {
+  async markCanceled(uploadId: string, data?: MarkCanceledData) {
+    const setObj: Partial<typeof uploads.$inferInsert> = {
       state: "CANCELED",
       updatedAt: new Date(),
     };

@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: upload-service
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: file-management-system
+
+# Common annotations
+commonAnnotations:
+  contact: "devops@example.com"
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - network-policy.yaml
+  # Note: secret.yaml.template is not included - create manually
+
+# Images - override tag here
+images:
+  - name: your-registry/upload-service
+    newName: your-registry/upload-service
+    newTag: latest
+# ConfigMap and Secret generators (alternative to static files)
+# configMapGenerator:
+#   - name: upload-service-config
+#     literals:
+#       - NODE_ENV=production
+#       - PORT=3000
+#       - LOG_LEVEL=info
+
+# secretGenerator:
+#   - name: upload-service-secrets
+#     envs:
+#       - secrets.env

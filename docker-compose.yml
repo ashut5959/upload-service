@@ -1,24 +1,37 @@
 services:
+  # -----------------------------------------------------
+  # 🗄️ PostgreSQL Database
+  # -----------------------------------------------------
   postgres:
-    image: postgres:18
+    image: postgres:18-alpine
     container_name: upload_postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: upload_service
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
-      start_period:
-        10s
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          memory: 512M
+    networks:
+      - backend
 
-        # -----------------------------------------------------
+  # -----------------------------------------------------
   # 🟢 PgBouncer (Connection Pooler)
   # -----------------------------------------------------
   pgbouncer:
@@ -28,28 +41,39 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "6432:6432"
+      - "6432:5432" # Host:Container - PgBouncer listens on 5432 inside container
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USER: postgres
       DB_PASSWORD: password
       DB_NAME: upload_service
-
-      AUTH_TYPE: md5
+      AUTH_TYPE: scram-sha-256 # Match PostgreSQL 18's default auth method
       POOL_MODE: transaction # 🔑 best for microservices
       MAX_CLIENT_CONN: 500
       DEFAULT_POOL_SIZE: 50
       RESERVE_POOL_SIZE: 20
       SERVER_IDLE_TIMEOUT: 60
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - backend
 
+  # -----------------------------------------------------
+  # 🔧 PgAdmin (PostgreSQL UI - Development Only)
+  # -----------------------------------------------------
   pgadmin:
-    image: dpage/pgadmin4
+    image: dpage/pgadmin4:latest
     container_name: upload_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: password
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
     ports:
       - "5050:80"
     depends_on:
@@ -57,15 +81,46 @@ services:
         condition: service_healthy
     volumes:
       - pgadmin_data:/var/lib/pgadmin
-
-  redis:
-    image: redis:7
-    container_name: upload_redis
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - backend
+    profiles:
+      - dev # Only start with --profile dev
 
   # -----------------------------------------------------
-  # 🔴 RedisInsight (Redis UI Dashboard)
+  # 🔴 Redis (Cache & Session Store)
+  # -----------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: upload_redis
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 256M
+    networks:
+      - backend
+
+  # -----------------------------------------------------
+  # 🔴 RedisInsight (Redis UI - Development Only)
   # -----------------------------------------------------
   redisinsight:
     image: redis/redisinsight:latest
@@ -73,11 +128,26 @@ services:
     ports:
       - "5540:5540"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    volumes:
+      - redisinsight_data:/data
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+    networks:
+      - backend
+    profiles:
+      - dev # Only start with --profile dev
 
+  # -----------------------------------------------------
+  # 🪣 MinIO (S3-Compatible Object Storage)
+  # -----------------------------------------------------
   minio:
-    image: minio/minio
+    image: minio/minio:latest
     container_name: upload_minio
     command: server /data --console-address ":9001"
     ports:
@@ -86,6 +156,7 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SERVER_URL: http://localhost:9000 # External URL for presigned URLs
     volumes:
       - minio_data:/data
     healthcheck:
@@ -93,9 +164,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          memory: 512M
+    networks:
+      - backend
 
   # -----------------------------------------------------
-  # 🟡 Elasticsearch Service
+  # 🟡 Elasticsearch (Log Aggregation & Search)
   # -----------------------------------------------------
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
@@ -104,32 +186,100 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
       - "9200:9200"
       - "9300:9300"
     volumes:
       - elastic_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200 || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          memory: 1G
+    networks:
+      - backend
 
   # -----------------------------------------------------
-  # 🟣 Kibana Service
+  # 🟣 Kibana (Elasticsearch UI - Development Only)
   # -----------------------------------------------------
   kibana:
     image: docker.elastic.co/kibana/kibana:8.12.0
     container_name: upload_kibana
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - SERVER_HOST=0.0.0.0
     ports:
       - "5601:5601"
     depends_on:
       elasticsearch:
         condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          memory: 512M
+    networks:
+      - backend
+    profiles:
+      - dev # Only start with --profile dev
+
   # -----------------------------------------------------
+  # 🔄 Database Migration Service
+  # -----------------------------------------------------
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: upload_migrate
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://postgres:password@postgres:5432/upload_service
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000 # Internal Docker network
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: uploads
+      S3_REGION: us-east-1
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTIC_USERNAME: elastic
+      ELASTIC_PASSWORD: changeme
+    volumes:
+      - ./drizzle.config.ts:/app/drizzle.config.ts:ro
+      - ./drizzle:/app/drizzle:ro
+    command: sh -c "bunx drizzle-kit push"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+    networks:
+      - backend
+    restart: "no"
+    profiles:
+      - migrate
+
   # -----------------------------------------------------
   # 🔵 Bun Backend Service
   # -----------------------------------------------------
@@ -137,15 +287,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime
     container_name: upload_backend
     ports:
-      - "3000:3000"
+      - "3001:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
 
       # 🔑 Database (via PgBouncer)
-      DATABASE_URL: postgres://postgres:password@pgbouncer:6432/upload_service
+      DATABASE_URL: postgres://postgres:password@pgbouncer:5432/upload_service
 
       # 🔴 Redis
       REDIS_URL: redis://redis:6379
@@ -156,7 +307,9 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: uploads
       S3_REGION: us-east-1
-      ELASTICSEARCH_URL: http://localhost:9200
+
+      # 🟡 Elasticsearch
+      ELASTICSEARCH_URL: http://elasticsearch:9200
       ELASTIC_USERNAME: elastic
       ELASTIC_PASSWORD: changeme
 
@@ -166,15 +319,57 @@ services:
       pgbouncer:
         condition: service_started
       redis:
-        condition: service_started
+        condition: service_healthy
       minio:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          memory: 512M
+    networks:
+      - backend
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
+# -----------------------------------------------------
+# 📦 Named Volumes (Persistent Data)
+# -----------------------------------------------------
 volumes:
   postgres_data:
+    driver: local
   pgadmin_data:
+    driver: local
+  redis_data:
+    driver: local
+  redisinsight_data:
+    driver: local
   minio_data:
+    driver: local
   elastic_data:
+    driver: local
+
+# -----------------------------------------------------
+# 🌐 Networks (Isolation & Security)
+# -----------------------------------------------------
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16

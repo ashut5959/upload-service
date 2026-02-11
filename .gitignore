@@ -32,3 +32,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Kubernetes secrets and environment files
+k8s/**/*.env
+k8s/**/secret.yaml
+!k8s/**/secret.yaml.template
+.env.k8s.*
+!.env.k8s.example

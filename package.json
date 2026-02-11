@@ -12,6 +12,7 @@
     "db:migrate": "bunx drizzle-kit migrate",
     "db:studio": "bunx drizzle-kit studio",
     "migrate": "bun run db:push",
+    "migrate:run": "bun migrate.ts",
     "generate": "bun run db:generate",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

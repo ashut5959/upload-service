@@ -30,6 +30,7 @@ export default [
                 URL: "readonly",
                 URLSearchParams: "readonly",
                 Bun: "readonly",
+                NodeJS: "readonly",
             },
         },
         plugins: {

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upload-service-config
+  namespace: upload-service
+  labels:
+    app.kubernetes.io/name: upload-service
+    app.kubernetes.io/component: backend
+data:
+  # Application Configuration
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+
+  # S3 Configuration (non-sensitive)
+  S3_REGION: "us-east-1"
+  S3_ENDPOINT: "https://s3.amazonaws.com"
+  S3_BUCKET: "uploads-bucket"
+
+  # Upload Constraints
+  MAX_FILE_SIZE: "5368709120" # 5GB
+  ALLOWED_FILE_TYPES: "image/jpeg,image/png,video/mp4,application/pdf,application/zip"
+
+  # Rate Limiting
+  RATE_LIMIT_ENABLED: "false" # Handled by gateway
+
+  # Feature Flags
+  AUDIT_LOG_ENABLED: "true"

@@ -1,0 +1,79 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: upload-service-netpol
+  namespace: upload-service
+  labels:
+    app.kubernetes.io/name: upload-service
+spec:
+  podSelector:
+    matchLabels:
+      app: upload-service
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress rules - who can send traffic to this service
+  ingress:
+    # Allow from API gateway
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: api-gateway # Adjust based on your gateway namespace
+      ports:
+        - protocol: TCP
+          port: 3000
+
+    # Allow from monitoring namespace (Prometheus)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 3000
+
+  # Egress rules - where this service can send traffic
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # Allow to PostgreSQL (adjust namespace/labels as needed)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: database
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Allow to Redis (adjust namespace/labels as needed)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: cache
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Allow to S3/external services (internet egress)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443 # HTTPS
+        - protocol: TCP
+          port: 80 # HTTP
