@@ -12,6 +12,16 @@ import {
 
 import { sql } from "drizzle-orm";
 
+export type UploadState =
+  | "INIT"
+  | "UPLOADING"
+  | "STAGED"
+  | "VALIDATING"
+  | "COMPLETED"
+  | "VALIDATION_FAILED"
+  | "FAILED"
+  | "CANCELED";
+
 // ----------------------------
 // Uploads Table
 // ----------------------------
@@ -36,10 +46,7 @@ export const uploads = pgTable(
     s3KeyPrefix: text("s3_key_prefix").notNull(),
     s3UploadId: text("s3_upload_id").notNull(),
 
-    state: text("state")
-      .$type<"INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED">()
-      .notNull()
-      .default("INIT"),
+    state: text("state").$type<UploadState>().notNull().default("INIT"),
 
     uploadedParts: integer("uploaded_parts").default(0),
 

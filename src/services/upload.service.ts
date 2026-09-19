@@ -13,6 +13,7 @@ import { redisLock } from "@/redis/redislock";
 import { randomUUID } from "crypto";
 import { logger } from "@/utils/logger";
 import { env } from "@/utils/env";
+import { stagingKeyPrefix } from "@/utils/s3-keys";
 
 export default class UploadService {
   constructor(
@@ -41,6 +42,7 @@ export default class UploadService {
       if (!existsInS3) {
         // 🔥 Recovery: recreate multipart upload
         const s3 = await this.storage.createMultipartUpload({
+          bucket: existing.s3Bucket,
           filename: existing.filename,
           contentType: existing.contentType ?? "application/octet-stream",
           keyPrefix: existing.s3KeyPrefix,
@@ -105,10 +107,12 @@ export default class UploadService {
     }
 
     const uploadId = randomUUID();
-    const keyPrefix = `uploads/${uploadId}/`;
+    const keyPrefix = stagingKeyPrefix(uploadId);
 
-    // create multipart upload in S3
+    // create multipart upload in the staging bucket — it's only promoted to the
+    // permanent bucket after passing finalization/validation
     const s3 = await this.storage.createMultipartUpload({
+      bucket: env.S3_STAGING_BUCKET,
       filename: data.filename,
       contentType: data.contentType,
       keyPrefix,
@@ -141,7 +145,7 @@ export default class UploadService {
         "Failed to persist upload record; aborting orphaned S3 upload"
       );
       await this.storage
-        .abortMultipartUpload({ key: s3.key, uploadId: s3.uploadId })
+        .abortMultipartUpload({ bucket: s3.bucket, key: s3.key, uploadId: s3.uploadId })
         .catch((abortErr) =>
           logger.error({ uploadId, abortErr }, "Failed to abort orphaned S3 multipart upload")
         );
@@ -210,6 +214,7 @@ export default class UploadService {
 
     // Trust S3, not the client: fetch the authoritative ETag/size for this part
     const verified = await this.storage.getUploadedPart({
+      bucket: upload.s3Bucket,
       key,
       uploadId: upload.s3UploadId,
       partNumber: data.PartNumber,
@@ -263,7 +268,9 @@ export default class UploadService {
       if (!upload) throw new Error("Upload not found");
 
       // Idempotent: auto-complete (from the last part) and an explicit client
-      // call can race — a second call just returns the already-completed result
+      // call can race — a second call just returns the current processing state
+      // rather than re-invoking CompleteMultipartUploadCommand, which S3 would
+      // reject a second time anyway.
       if (upload.state === "COMPLETED") {
         return {
           status: "completed" as const,
@@ -271,6 +278,19 @@ export default class UploadService {
           finalKey: upload.finalS3Key!,
           etag: upload.etag!,
         };
+      }
+
+      if (upload.state === "STAGED" || upload.state === "VALIDATING") {
+        return {
+          status: "staged" as const,
+          uploadId,
+          finalKey: upload.finalS3Key!,
+          etag: upload.etag!,
+        };
+      }
+
+      if (upload.state === "VALIDATION_FAILED") {
+        throw new Error(`UPLOAD_VALIDATION_FAILED: ${upload.lastError ?? "file was rejected"}`);
       }
 
       if (!upload.s3UploadId) {
@@ -313,24 +333,27 @@ export default class UploadService {
         key: `${upload.s3KeyPrefix}${upload.filename}`,
       });
 
-      // 5️⃣ Call S3 CompleteMultipartUpload
+      // 5️⃣ Call S3 CompleteMultipartUpload against the staging bucket — the
+      // object is now fully assembled, but not yet validated or permanent
       const result = await this.storage.completeMultipartUpload({
+        bucket: upload.s3Bucket,
         key: `${upload.s3KeyPrefix}${upload.filename}`,
         uploadId: upload.s3UploadId,
         parts: formattedParts,
       });
 
-      // 6️⃣ Update DB → COMPLETED
-      await this.uploadRepo.markCompleted(uploadId, {
+      // 6️⃣ Update DB → STAGED (promotion to COMPLETED happens asynchronously,
+      // gated on validation — see completion.service.ts / completion.worker.ts)
+      await this.uploadRepo.markStaged(uploadId, {
         etag: result.ETag,
         finalS3Key: `${upload.s3KeyPrefix}${upload.filename}`,
       });
 
       // 7️⃣ Emit event
-      await this.eventRepo.log(uploadId, "UPLOAD_COMPLETED", { etag: result.ETag });
+      await this.eventRepo.log(uploadId, "UPLOAD_STAGED", { etag: result.ETag });
 
       return {
-        status: "completed" as const,
+        status: "staged" as const,
         uploadId,
         finalKey: `${upload.s3KeyPrefix}${upload.filename}`,
         etag: result.ETag,
@@ -354,12 +377,23 @@ export default class UploadService {
       if (upload.state === "COMPLETED") {
         return { status: "already_completed" as const, uploadId };
       }
+      // Once the object is assembled in staging (or beyond), there's no S3
+      // multipart session left to abort — falling through would hit the
+      // abortMultipartUpload catch block below and incorrectly mark an
+      // already-staged/validated upload as CANCELED.
+      if (upload.state === "STAGED" || upload.state === "VALIDATING") {
+        return { status: "already_staged" as const, uploadId };
+      }
+      if (upload.state === "VALIDATION_FAILED") {
+        return { status: "already_validation_failed" as const, uploadId };
+      }
 
       // 2. If S3 upload session exists, abort it
       try {
         if (upload.s3UploadId && upload.s3KeyPrefix) {
           const key = `${upload.s3KeyPrefix}${upload.filename}`;
           await this.storage.abortMultipartUpload({
+            bucket: upload.s3Bucket,
             key,
             uploadId: upload.s3UploadId,
           });
@@ -432,6 +466,6 @@ export default class UploadService {
       );
     }
 
-    return this.storage.presignGetObject({ key: upload.finalS3Key });
+    return this.storage.presignGetObject({ bucket: upload.s3Bucket, key: upload.finalS3Key });
   }
 }

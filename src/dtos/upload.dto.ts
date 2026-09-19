@@ -103,7 +103,10 @@ export type PartCompleteResponseDto = z.infer<typeof PartCompleteResponseSchema>
 // ============================================================================
 
 export const CompleteUploadResponseSchema = z.object({
-  status: z.literal("completed"),
+  // "staged": multipart upload assembled in the staging bucket, pending async
+  // validation/promotion. "completed": already validated and promoted — only
+  // reachable via the idempotent-repeat-call path.
+  status: z.union([z.literal("staged"), z.literal("completed")]),
   uploadId: z.string().uuid(),
   finalKey: z.string(),
   etag: z.string(),
@@ -117,7 +120,14 @@ export type CompleteUploadResponseDto = z.infer<typeof CompleteUploadResponseSch
 
 export const CancelUploadResponseSchema = z.union([
   z.object({
-    status: z.enum(["canceled", "not_found", "already_canceled", "already_completed"]),
+    status: z.enum([
+      "canceled",
+      "not_found",
+      "already_canceled",
+      "already_completed",
+      "already_staged",
+      "already_validation_failed",
+    ]),
     uploadId: z.string().uuid(),
   }),
   z.object({

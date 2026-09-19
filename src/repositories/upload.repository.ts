@@ -1,8 +1,9 @@
 import type { getDb } from "@/clients/db.client";
-import { uploads } from "@/db/schema";
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { uploads, type UploadState } from "@/db/schema";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 
 export type DbClient = ReturnType<typeof getDb>;
+export type UploadRow = typeof uploads.$inferSelect;
 
 export interface CreateUploadData {
   id: string;
@@ -18,7 +19,7 @@ export interface CreateUploadData {
   s3Bucket: string;
   s3KeyPrefix: string;
   s3UploadId: string;
-  state: "INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED";
+  state: UploadState;
   metadata: Record<string, unknown>;
   expiresAt?: Date;
 }
@@ -26,12 +27,22 @@ export interface CreateUploadData {
 export interface ListUploadsFilter {
   uploadedById: string;
   tenantId?: string;
-  state?: "INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED";
+  state?: UploadState;
+}
+
+export interface MarkStagedData {
+  etag: string;
+  finalS3Key: string;
 }
 
 export interface MarkCompletedData {
+  bucket: string;
   etag: string;
   finalS3Key: string;
+}
+
+export interface MarkValidationFailedData {
+  lastError: string;
 }
 
 export interface MarkCanceledData {
@@ -102,11 +113,55 @@ export default class UploadRepository {
       .where(and(eq(uploads.state, "INIT"), lt(uploads.expiresAt, new Date())));
   }
 
+  async findUploadsPendingFinalization() {
+    return this.db
+      .select()
+      .from(uploads)
+      .where(inArray(uploads.state, ["STAGED", "VALIDATING"]));
+  }
+
+  async markStaged(uploadId: string, data: MarkStagedData) {
+    return this.db
+      .update(uploads)
+      .set({
+        state: "STAGED",
+        etag: data.etag,
+        finalS3Key: data.finalS3Key,
+        updatedAt: new Date(),
+      })
+      .where(eq(uploads.id, uploadId));
+  }
+
+  // Atomic claim: only succeeds if the row is still STAGED, so two worker
+  // processes racing the same upload can't both proceed with finalization.
+  async markValidating(uploadId: string): Promise<boolean> {
+    const result = await this.db
+      .update(uploads)
+      .set({ state: "VALIDATING", updatedAt: new Date() })
+      .where(and(eq(uploads.id, uploadId), eq(uploads.state, "STAGED")))
+      .returning({ id: uploads.id });
+
+    return result.length > 0;
+  }
+
+  async markValidationFailed(uploadId: string, data: MarkValidationFailedData) {
+    return this.db
+      .update(uploads)
+      .set({
+        state: "VALIDATION_FAILED",
+        lastError: data.lastError,
+        lastErrorAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(uploads.id, uploadId));
+  }
+
   async markCompleted(uploadId: string, data: MarkCompletedData) {
     return this.db
       .update(uploads)
       .set({
         state: "COMPLETED",
+        s3Bucket: data.bucket,
         etag: data.etag,
         finalS3Key: data.finalS3Key,
         updatedAt: new Date(),

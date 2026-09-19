@@ -11,6 +11,7 @@ const envSchema = z.object({
   S3_ACCESS_KEY: z.string().min(1, "S3_ACCESS_KEY is required"),
   S3_SECRET_KEY: z.string().min(1, "S3_SECRET_KEY is required"),
   S3_BUCKET: z.string().min(1, "S3_BUCKET is required"),
+  S3_STAGING_BUCKET: z.string().min(1, "S3_STAGING_BUCKET is required"),
 
   NODE_ENV: z.enum(["development", "production", "test"]).default("development").optional(),
   ELASTICSEARCH_URL: z.string().min(1, "ELASTICSEARCH_URL is required"),
@@ -33,6 +34,12 @@ const envSchema = z.object({
     .number()
     .positive()
     .default(15 * 60 * 1000),
+  STAGED_POLL_INTERVAL_MS: z.coerce.number().positive().default(5000),
+
+  // S3 storage-class lifecycle tiering (cost optimization for aged objects)
+  S3_IA_TRANSITION_DAYS: z.coerce.number().positive().default(30),
+  S3_GLACIER_TRANSITION_DAYS: z.coerce.number().positive().default(90),
+  S3_ABORT_INCOMPLETE_MULTIPART_DAYS: z.coerce.number().positive().default(2),
 });
 
 export const env = envSchema.parse(process.env);
