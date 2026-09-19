@@ -30,6 +30,8 @@ export const uploads = pgTable(
     chunkSize: integer("chunk_size").notNull(),
     totalParts: integer("total_parts").notNull(),
 
+    contentHash: text("content_hash"),
+
     s3Bucket: text("s3_bucket").notNull(),
     s3KeyPrefix: text("s3_key_prefix").notNull(),
     s3UploadId: text("s3_upload_id").notNull(),
@@ -76,6 +78,10 @@ export const uploads = pgTable(
       idxNotDeleted: index("idx_uploads_not_deleted")
         .on(table.state)
         .where(sql`deleted_at IS NULL`),
+
+      idxContentHash: index("idx_uploads_content_hash")
+        .on(table.contentHash)
+        .where(sql`state = 'COMPLETED'`),
 
       // ---- CHECK CONSTRAINTS ----
       chkSizePositive: sql`CHECK (size > 0)`,

@@ -52,6 +52,7 @@ export default class UploadService {
 
       // return resume info
       return {
+        instantUpload: false,
         uploadId: existing.id,
         bucket: existing.s3Bucket,
         key: existing.s3KeyPrefix,
@@ -62,7 +63,20 @@ export default class UploadService {
       };
     }
 
-    // 2️⃣ NEW UPLOAD PATH — validate against S3 hard limits and service policy
+    // 2️⃣ INSTANT UPLOAD — a completed upload with identical content already exists
+    // anywhere in the system; skip the S3 multipart session entirely.
+    const duplicate = await this.uploadRepo.getCompletedByContentHash(data.contentHash);
+    if (duplicate) {
+      return {
+        instantUpload: true,
+        uploadId: duplicate.id,
+        finalKey: duplicate.finalS3Key!,
+        etag: duplicate.etag!,
+        message: "Instant upload — file already exists",
+      };
+    }
+
+    // 3️⃣ NEW UPLOAD PATH — validate against S3 hard limits and service policy
     if (data.size > env.MAX_UPLOAD_SIZE_BYTES) {
       throw new Error(
         `FILE_TOO_LARGE: size ${data.size} exceeds maximum of ${env.MAX_UPLOAD_SIZE_BYTES} bytes`
@@ -113,6 +127,7 @@ export default class UploadService {
         size: data.size,
         chunkSize: data.chunkSize,
         totalParts,
+        contentHash: data.contentHash,
         s3Bucket: s3.bucket,
         s3KeyPrefix: keyPrefix,
         s3UploadId: s3.uploadId,
@@ -134,6 +149,7 @@ export default class UploadService {
     }
 
     return {
+      instantUpload: false,
       uploadId,
       bucket: s3.bucket,
       key: s3.key,

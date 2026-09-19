@@ -14,6 +14,7 @@ export interface CreateUploadData {
   size: number;
   chunkSize: number;
   totalParts: number;
+  contentHash: string;
   s3Bucket: string;
   s3KeyPrefix: string;
   s3UploadId: string;
@@ -50,6 +51,16 @@ export default class UploadRepository {
 
   async getUpload(uploadId: string) {
     const rows = await this.db.select().from(uploads).where(eq(uploads.id, uploadId)).limit(1);
+
+    return rows[0];
+  }
+
+  async getCompletedByContentHash(contentHash: string) {
+    const rows = await this.db
+      .select()
+      .from(uploads)
+      .where(and(eq(uploads.contentHash, contentHash), eq(uploads.state, "COMPLETED")))
+      .limit(1);
 
     return rows[0];
   }

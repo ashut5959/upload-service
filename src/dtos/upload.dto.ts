@@ -16,6 +16,12 @@ export const InitUploadRequestSchema = z.object({
   size: z.number().positive().int(),
   chunkSize: z.number().positive().int(),
 
+  // MD5 hex digest of the file, computed client-side; used for instant-upload dedup
+  contentHash: z
+    .string()
+    .length(32)
+    .regex(/^[a-f0-9]+$/),
+
   // User context
   uploadedById: z.string().min(1),
   uploadedByType: z.string().min(1),
@@ -35,15 +41,25 @@ export const PartInfoSchema = z.object({
 
 export type PartInfo = z.infer<typeof PartInfoSchema>;
 
-export const InitUploadResponseSchema = z.object({
-  uploadId: z.string().uuid(),
-  bucket: z.string(),
-  key: z.string(),
-  chunkSize: z.number().int().positive(),
-  totalParts: z.number().int().positive(),
-  uploadedParts: z.array(PartInfoSchema),
-  message: z.string(),
-});
+export const InitUploadResponseSchema = z.union([
+  z.object({
+    instantUpload: z.literal(true),
+    uploadId: z.string().uuid(),
+    finalKey: z.string(),
+    etag: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    instantUpload: z.literal(false),
+    uploadId: z.string().uuid(),
+    bucket: z.string(),
+    key: z.string(),
+    chunkSize: z.number().int().positive(),
+    totalParts: z.number().int().positive(),
+    uploadedParts: z.array(PartInfoSchema),
+    message: z.string(),
+  }),
+]);
 
 export type InitUploadResponseDto = z.infer<typeof InitUploadResponseSchema>;
 

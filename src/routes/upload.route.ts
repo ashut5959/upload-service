@@ -42,6 +42,7 @@ export default new Elysia({ prefix: "/uploads" })
       contentType: t.String({ pattern: "^[a-z]+/[a-z0-9+.-]+$" }),
       size: t.Integer({ minimum: 1 }),
       chunkSize: t.Integer({ minimum: 1 }),
+      contentHash: t.String({ minLength: 32, maxLength: 32, pattern: "^[a-f0-9]+$" }),
       uploadedById: t.String({ minLength: 1 }),
       uploadedByType: t.String({ minLength: 1 }),
       tenantId: t.Optional(t.String()),
