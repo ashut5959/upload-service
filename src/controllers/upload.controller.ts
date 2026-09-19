@@ -22,4 +22,16 @@ export default class UploadController {
   cancelUpload = async ({ params }: { params: any }) => {
     return this.uploadService.cancelUpload(params.uploadId);
   };
+
+  getStatus = async ({ params }: { params: any }) => {
+    return this.uploadService.getStatus(params.uploadId);
+  };
+
+  listUploads = async ({ query }: { query: any }) => {
+    return this.uploadService.listUploads(query);
+  };
+
+  getDownloadUrl = async ({ params }: { params: any }) => {
+    return this.uploadService.getDownloadUrl(params.uploadId);
+  };
 }

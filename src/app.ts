@@ -21,7 +21,7 @@ import cors from "@elysiajs/cors";
 const app = new Elysia()
   .use(
     cors({
-      origin: "http://localhost:3000",
+      origin: "http://localhost:5173",
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
@@ -53,9 +53,10 @@ const app = new Elysia()
 
   .onError(({ error, request }) => {
     logger.error({ err: error, url: request.url }, "Unhandled error in Upload Service");
+    const message = error instanceof Error ? error.message : String(error);
     return {
       status: "error",
-      message: env.NODE_ENV === "production" ? "Internal Server Error" : error,
+      message: env.NODE_ENV === "production" ? "Internal Server Error" : message,
     };
   })
 

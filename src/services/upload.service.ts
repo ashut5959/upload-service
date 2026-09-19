@@ -1,5 +1,7 @@
 import type UploadRepository from "@/repositories/upload.repository";
+import type { ListUploadsFilter } from "@/repositories/upload.repository";
 import type PartRepository from "@/repositories/part.repository";
+import type EventRepository from "@/repositories/event.repository";
 import type StorageStrategy from "@/strategies/storage.strategy";
 import type {
   InitUploadRequestDto,
@@ -10,60 +12,15 @@ import type {
 import { redisLock } from "@/redis/redislock";
 import { randomUUID } from "crypto";
 import { logger } from "@/utils/logger";
+import { env } from "@/utils/env";
 
 export default class UploadService {
   constructor(
     private uploadRepo: UploadRepository,
     private partRepo: PartRepository,
-    private storage: StorageStrategy
+    private storage: StorageStrategy,
+    private eventRepo: EventRepository
   ) {}
-
-  // async initUpload(data: any) {
-  //     const uploadId = randomUUID();
-  //     const keyPrefix = `uploads/${uploadId}/`;
-  //     const totalParts = Math.ceil(data.size / data.chunkSize);
-  //     // 1️⃣ Create DB record (INIT state)
-  //     await this.uploadRepo.createUpload({
-  //         id: uploadId,
-
-  //         uploadedById: data.uploadedById,
-  //         uploadedByType: data.uploadedByType,
-  //         tenantId: data.tenantId || null,
-
-  //         filename: data.filename,
-  //         contentType: data.contentType,
-  //         size: data.size,
-  //         chunkSize: data.chunkSize,
-  //         totalParts,
-
-  //         s3Bucket: data.s3Bucket || "",          // temporary
-  //         s3KeyPrefix: keyPrefix,
-  //         s3UploadId: "pending",
-
-  //         state: "INIT",
-  //         metadata: data.metadata || {},
-  //     });
-
-  //     // 2️⃣ Create Multipart Upload in S3
-  //     const s3 = await this.storage.createMultipartUpload({
-  //         filename: data.filename,
-  //         contentType: data.contentType,
-  //         keyPrefix,
-  //     });
-
-  //     // 3️⃣ Update DB with S3 UploadId
-  //     await this.uploadRepo.updateS3UploadId(uploadId, s3.uploadId);
-
-  //     // 4️⃣ Return Upload Info to Client
-  //     return {
-  //         uploadId,
-  //         bucket: s3.bucket,
-  //         key: s3.key,
-  //         totalParts,
-  //         chunkSize: data.chunkSize,
-  //         message: "Upload initialized",
-  //     };
-  // }
 
   async initUpload(data: InitUploadRequestDto): Promise<InitUploadResponseDto> {
     // 1️⃣ RESUME PATH
@@ -105,10 +62,36 @@ export default class UploadService {
       };
     }
 
-    // 2️⃣ NEW UPLOAD PATH
+    // 2️⃣ NEW UPLOAD PATH — validate against S3 hard limits and service policy
+    if (data.size > env.MAX_UPLOAD_SIZE_BYTES) {
+      throw new Error(
+        `FILE_TOO_LARGE: size ${data.size} exceeds maximum of ${env.MAX_UPLOAD_SIZE_BYTES} bytes`
+      );
+    }
+
+    if (env.ALLOWED_CONTENT_TYPES) {
+      const allowed = env.ALLOWED_CONTENT_TYPES.split(",").map((t) => t.trim());
+      if (!allowed.includes(data.contentType)) {
+        throw new Error(`CONTENT_TYPE_NOT_ALLOWED: ${data.contentType}`);
+      }
+    }
+
+    const totalParts = Math.ceil(data.size / data.chunkSize);
+
+    if (totalParts > env.MAX_PARTS) {
+      throw new Error(
+        `TOO_MANY_PARTS: ${totalParts} parts exceeds S3's limit of ${env.MAX_PARTS}; increase chunkSize`
+      );
+    }
+
+    if (totalParts > 1 && data.chunkSize < env.MIN_PART_SIZE_BYTES) {
+      throw new Error(
+        `CHUNK_SIZE_TOO_SMALL: chunkSize must be at least ${env.MIN_PART_SIZE_BYTES} bytes for multi-part uploads`
+      );
+    }
+
     const uploadId = randomUUID();
     const keyPrefix = `uploads/${uploadId}/`;
-    const totalParts = Math.ceil(data.size / data.chunkSize);
 
     // create multipart upload in S3
     const s3 = await this.storage.createMultipartUpload({
@@ -117,23 +100,38 @@ export default class UploadService {
       keyPrefix,
     });
 
-    // persist upload
-    await this.uploadRepo.createUpload({
-      id: uploadId,
-      uploadedById: data.uploadedById,
-      uploadedByType: data.uploadedByType,
-      tenantId: data.tenantId || null,
-      filename: data.filename,
-      contentType: data.contentType,
-      size: data.size,
-      chunkSize: data.chunkSize,
-      totalParts,
-      s3Bucket: s3.bucket,
-      s3KeyPrefix: keyPrefix,
-      s3UploadId: s3.uploadId,
-      state: "INIT",
-      metadata: data.metadata || {},
-    });
+    // persist upload — roll back the S3 session if the DB write fails, so we
+    // never leave an untracked multipart upload accumulating storage costs
+    try {
+      await this.uploadRepo.createUpload({
+        id: uploadId,
+        uploadedById: data.uploadedById,
+        uploadedByType: data.uploadedByType,
+        tenantId: data.tenantId || null,
+        filename: data.filename,
+        contentType: data.contentType,
+        size: data.size,
+        chunkSize: data.chunkSize,
+        totalParts,
+        s3Bucket: s3.bucket,
+        s3KeyPrefix: keyPrefix,
+        s3UploadId: s3.uploadId,
+        state: "INIT",
+        metadata: data.metadata || {},
+        expiresAt: new Date(Date.now() + env.UPLOAD_EXPIRY_HOURS * 60 * 60 * 1000),
+      });
+    } catch (err) {
+      logger.error(
+        { uploadId, err },
+        "Failed to persist upload record; aborting orphaned S3 upload"
+      );
+      await this.storage
+        .abortMultipartUpload({ key: s3.key, uploadId: s3.uploadId })
+        .catch((abortErr) =>
+          logger.error({ uploadId, abortErr }, "Failed to abort orphaned S3 multipart upload")
+        );
+      throw err;
+    }
 
     return {
       uploadId,
@@ -187,27 +185,58 @@ export default class UploadService {
   async partComplete(
     uploadId: string,
     data: PartCompleteRequestDto
-  ): Promise<PartCompleteResponseDto> {
-    await this.partRepo.savePart(uploadId, data.PartNumber, data.ETag);
-    await this.uploadRepo.incrementUploadedParts(uploadId);
+  ): Promise<PartCompleteResponseDto & { autoCompleted: boolean }> {
+    const upload = await this.uploadRepo.getUpload(uploadId);
+    if (!upload) throw new Error("Upload not found");
+    if (!upload.s3UploadId) throw new Error("Upload missing S3 UploadId");
 
-    const uploadedParts = await this.uploadRepo.getUpload(uploadId);
-    if (!uploadedParts) throw new Error("Upload not found");
+    const key = `${upload.s3KeyPrefix}${upload.filename}`;
 
-    logger.debug({
-      uploadId,
-      uploadedParts: uploadedParts.uploadedParts,
-      totalParts: uploadedParts.totalParts,
+    // Trust S3, not the client: fetch the authoritative ETag/size for this part
+    const verified = await this.storage.getUploadedPart({
+      key,
+      uploadId: upload.s3UploadId,
+      partNumber: data.PartNumber,
     });
 
-    // if (uploadedParts.uploadedParts === uploadedParts.totalParts) {
-    //     await this.completeUpload(uploadId);
-    // }
+    if (!verified) {
+      throw new Error(`PART_NOT_FOUND_IN_S3: part ${data.PartNumber} was not found on S3`);
+    }
+
+    if (verified.etag !== data.ETag) {
+      throw new Error(`ETAG_MISMATCH: reported ETag does not match the part S3 actually received`);
+    }
+
+    await this.partRepo.savePart(uploadId, data.PartNumber, verified.etag, verified.size);
+
+    // Recount from real rows rather than incrementing, so retries can't inflate this past totalParts
+    const uploadedParts = await this.partRepo.countParts(uploadId);
+    await this.uploadRepo.setUploadedParts(uploadId, uploadedParts);
+
+    await this.eventRepo.log(uploadId, "PART_COMPLETED", {
+      partNumber: data.PartNumber,
+      size: verified.size,
+    });
+
+    logger.debug({ uploadId, uploadedParts, totalParts: upload.totalParts });
+
+    let autoCompleted = false;
+
+    if (uploadedParts === upload.totalParts) {
+      try {
+        await this.completeUpload(uploadId);
+        autoCompleted = true;
+      } catch (err) {
+        // Best-effort: log and let the client still call /complete explicitly
+        logger.warn({ uploadId, err }, "Auto-complete after last part failed");
+      }
+    }
 
     return {
       message: "Part uploaded successfully",
-      uploadedParts: uploadedParts.uploadedParts ?? 0,
-      totalParts: uploadedParts.totalParts,
+      uploadedParts,
+      totalParts: upload.totalParts,
+      autoCompleted,
     };
   }
 
@@ -216,6 +245,17 @@ export default class UploadService {
       // 1️⃣ Fetch upload record
       const upload = await this.uploadRepo.getUpload(uploadId);
       if (!upload) throw new Error("Upload not found");
+
+      // Idempotent: auto-complete (from the last part) and an explicit client
+      // call can race — a second call just returns the already-completed result
+      if (upload.state === "COMPLETED") {
+        return {
+          status: "completed" as const,
+          uploadId,
+          finalKey: upload.finalS3Key!,
+          etag: upload.etag!,
+        };
+      }
 
       if (!upload.s3UploadId) {
         throw new Error("S3 uploadId missing — cannot complete multipart upload");
@@ -232,6 +272,14 @@ export default class UploadService {
       if (parts.length !== upload.totalParts) {
         throw new Error(
           `Upload incomplete: expected ${upload.totalParts}, but only ${parts.length} parts uploaded`
+        );
+      }
+
+      // 3️⃣.5 Validate total uploaded bytes match the declared file size
+      const totalUploadedSize = parts.reduce((sum, p) => sum + (p.size ?? 0), 0);
+      if (totalUploadedSize !== upload.size) {
+        throw new Error(
+          `SIZE_MISMATCH: expected ${upload.size} bytes but uploaded parts total ${totalUploadedSize} bytes`
         );
       }
 
@@ -262,8 +310,8 @@ export default class UploadService {
         finalS3Key: `${upload.s3KeyPrefix}${upload.filename}`,
       });
 
-      // (Optional) 7️⃣ Emit event
-      // await this.eventRepo.log(uploadId, "UPLOAD_COMPLETED", { result });
+      // 7️⃣ Emit event
+      await this.eventRepo.log(uploadId, "UPLOAD_COMPLETED", { etag: result.ETag });
 
       return {
         status: "completed" as const,
@@ -308,6 +356,7 @@ export default class UploadService {
         await this.uploadRepo.markCanceled(uploadId, {
           lastError: errorMessage,
         });
+        await this.eventRepo.log(uploadId, "UPLOAD_CANCEL_FAILED", { error: errorMessage });
         // Option: rethrow if you want the caller to retry
         return { status: "s3_abort_failed" as const, uploadId, error: errorMessage };
       }
@@ -324,10 +373,49 @@ export default class UploadService {
       // 4. Mark upload row as CANCELED
       await this.uploadRepo.markCanceled(uploadId);
 
-      // 5. (Optional) emit event to events table or push notification
-      // await this.eventRepo.log(uploadId, "UPLOAD_CANCELED", { by: "uploader" });
+      // 5. Emit event
+      await this.eventRepo.log(uploadId, "UPLOAD_CANCELED", {});
 
       return { status: "canceled" as const, uploadId };
     });
+  }
+
+  async getStatus(uploadId: string) {
+    const upload = await this.uploadRepo.getUpload(uploadId);
+    if (!upload) throw new Error("Upload not found");
+
+    const parts = await this.partRepo.listParts(uploadId);
+
+    return {
+      uploadId: upload.id,
+      state: upload.state,
+      filename: upload.filename,
+      contentType: upload.contentType,
+      size: upload.size,
+      chunkSize: upload.chunkSize,
+      totalParts: upload.totalParts,
+      uploadedParts: upload.uploadedParts ?? 0,
+      parts: parts.map((p) => ({ partNumber: p.partNumber, etag: p.etag, size: p.size })),
+      createdAt: upload.createdAt,
+      updatedAt: upload.updatedAt,
+      expiresAt: upload.expiresAt,
+    };
+  }
+
+  async listUploads(filter: ListUploadsFilter) {
+    return this.uploadRepo.listUploads(filter);
+  }
+
+  async getDownloadUrl(uploadId: string) {
+    const upload = await this.uploadRepo.getUpload(uploadId);
+    if (!upload) throw new Error("Upload not found");
+
+    if (upload.state !== "COMPLETED" || !upload.finalS3Key) {
+      throw new Error(
+        "UPLOAD_NOT_COMPLETED: cannot download a file that hasn't finished uploading"
+      );
+    }
+
+    return this.storage.presignGetObject({ key: upload.finalS3Key });
   }
 }

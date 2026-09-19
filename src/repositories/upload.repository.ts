@@ -1,6 +1,6 @@
 import type { getDb } from "@/clients/db.client";
 import { uploads } from "@/db/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 
 export type DbClient = ReturnType<typeof getDb>;
 
@@ -19,6 +19,13 @@ export interface CreateUploadData {
   s3UploadId: string;
   state: "INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED";
   metadata: Record<string, unknown>;
+  expiresAt?: Date;
+}
+
+export interface ListUploadsFilter {
+  uploadedById: string;
+  tenantId?: string;
+  state?: "INIT" | "UPLOADING" | "COMPLETED" | "FAILED" | "CANCELED";
 }
 
 export interface MarkCompletedData {
@@ -55,6 +62,33 @@ export default class UploadRepository {
         updatedAt: new Date(),
       })
       .where(eq(uploads.id, uploadId));
+  }
+
+  async setUploadedParts(uploadId: string, count: number) {
+    return this.db
+      .update(uploads)
+      .set({ uploadedParts: count, updatedAt: new Date() })
+      .where(eq(uploads.id, uploadId));
+  }
+
+  async listUploads(filter: ListUploadsFilter) {
+    const conditions = [eq(uploads.uploadedById, filter.uploadedById)];
+
+    if (filter.tenantId) conditions.push(eq(uploads.tenantId, filter.tenantId));
+    if (filter.state) conditions.push(eq(uploads.state, filter.state));
+
+    return this.db
+      .select()
+      .from(uploads)
+      .where(and(...conditions))
+      .orderBy(desc(uploads.createdAt));
+  }
+
+  async findExpiredUploads() {
+    return this.db
+      .select()
+      .from(uploads)
+      .where(and(eq(uploads.state, "INIT"), lt(uploads.expiresAt, new Date())));
   }
 
   async markCompleted(uploadId: string, data: MarkCompletedData) {

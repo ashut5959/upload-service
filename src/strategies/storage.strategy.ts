@@ -25,4 +25,12 @@ export default interface StorageStrategy {
   abortMultipartUpload(data: { key: string; uploadId: string }): Promise<any>;
 
   checkMultipartUpload(data: { bucket: string; key: string; uploadId: string }): Promise<boolean>;
+
+  getUploadedPart(data: {
+    key: string;
+    uploadId: string;
+    partNumber: number;
+  }): Promise<{ etag: string; size: number } | null>;
+
+  presignGetObject(data: { key: string }): Promise<{ url: string }>;
 }

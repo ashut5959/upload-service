@@ -5,6 +5,7 @@ import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   ListPartsCommand,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
@@ -135,5 +136,39 @@ export class S3StorageStrategy implements StorageStrategy {
       }
       throw err; // real error
     }
+  }
+
+  async getUploadedPart(data: {
+    key: string;
+    uploadId: string;
+    partNumber: number;
+  }): Promise<{ etag: string; size: number } | null> {
+    const cmd = new ListPartsCommand({
+      Bucket: env.S3_BUCKET,
+      Key: data.key,
+      UploadId: data.uploadId,
+      PartNumberMarker: String(data.partNumber - 1),
+      MaxParts: 1,
+    });
+
+    const response = await this.s3.send(cmd);
+    const part = response.Parts?.[0];
+
+    if (!part || part.PartNumber !== data.partNumber || !part.ETag) {
+      return null;
+    }
+
+    return { etag: part.ETag, size: part.Size ?? 0 };
+  }
+
+  async presignGetObject(data: { key: string }): Promise<{ url: string }> {
+    const command = new GetObjectCommand({
+      Bucket: env.S3_BUCKET,
+      Key: data.key,
+    });
+
+    const url = await getSignedUrl(this.s3, command, { expiresIn: 3600 });
+
+    return { url };
   }
 }

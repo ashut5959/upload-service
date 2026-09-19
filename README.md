@@ -6,11 +6,11 @@ A backend service for resumable, chunked file uploads to S3-compatible object st
 
 Clients don't upload file bytes through this service — they upload parts directly to S3 using presigned URLs. This service is the control plane:
 
-1. Initializes (or resumes) an S3 multipart upload and records it in Postgres.
+1. Initializes (or resumes) an S3 multipart upload and records it in Postgres, after validating size/chunk-size/content-type against configured limits.
 2. Issues presigned PUT URLs for individual parts.
-3. Records each part's ETag as the client reports it uploaded.
-4. Completes the S3 multipart upload once all parts are accounted for.
-5. Aborts and cleans up on cancellation.
+3. Verifies each reported part directly against S3 (not just trusting the client) and records its authoritative ETag/size.
+4. Completes the S3 multipart upload once all parts are accounted for and their sizes match the declared file size — automatically as soon as the last part lands, or on an explicit request.
+5. Aborts and cleans up on cancellation, and sweeps abandoned uploads in the background once they expire.
 
 See [docs/architecture.md](docs/architecture.md) for the full request flow and data model, and [docs/api.md](docs/api.md) for the complete API reference.
 
@@ -93,6 +93,12 @@ Environment variables are validated at startup via Zod ([src/utils/env.ts](src/u
 | `ELASTICSEARCH_URL` | Yes | — | Elasticsearch endpoint (log shipping) |
 | `ELASTIC_USERNAME` | Yes | — | Elasticsearch username |
 | `ELASTIC_PASSWORD` | Yes | — | Elasticsearch password |
+| `MAX_UPLOAD_SIZE_BYTES` | No | `5368709120` (5GB) | Max total file size accepted at `/uploads/init` |
+| `MIN_PART_SIZE_BYTES` | No | `5242880` (5MB) | Minimum `chunkSize` for multi-part uploads (S3's own per-part minimum) |
+| `MAX_PARTS` | No | `10000` | Max parts per upload (S3's hard limit) |
+| `ALLOWED_CONTENT_TYPES` | No | unset (all allowed) | Comma-separated MIME allow-list, e.g. `video/mp4,image/png` |
+| `UPLOAD_EXPIRY_HOURS` | No | `24` | How long an incomplete upload can sit before the cleanup worker aborts it |
+| `CLEANUP_INTERVAL_MS` | No | `900000` (15 min) | How often the completion worker sweeps for expired uploads |
 
 > `JWT_SECRET` appears in `.env` but is not currently read or enforced anywhere in the code — authentication is not yet implemented. See [docs/security_recommendations.md](docs/security_recommendations.md).
 
@@ -106,9 +112,12 @@ Full request/response schemas, examples, and error formats are in [docs/api.md](
 | `GET` | `/metrics` | Prometheus metrics |
 | `POST` | `/uploads/init` | Start a new upload, or resume an existing one |
 | `POST` | `/uploads/:uploadId/presign-part` | Get a presigned URL for one part |
-| `POST` | `/uploads/:uploadId/part-complete` | Record a completed part's ETag |
-| `POST` | `/uploads/:uploadId/complete` | Finalize the multipart upload |
+| `POST` | `/uploads/:uploadId/part-complete` | Record a completed part (server-verified against S3) |
+| `POST` | `/uploads/:uploadId/complete` | Finalize the multipart upload (idempotent) |
 | `DELETE` | `/uploads/:uploadId` | Cancel/abort an upload |
+| `GET` | `/uploads/:uploadId` | Upload status + recorded parts |
+| `GET` | `/uploads` | List uploads for a given `uploadedById` |
+| `GET` | `/uploads/:uploadId/download` | Presigned download URL for a completed upload |
 
 ## Project Structure
 
@@ -126,7 +135,7 @@ src/
 ├── middleware/                # Body limits, CORS, sanitization, metrics, logging, error handling
 ├── redis/redislock.ts         # Distributed lock (SET NX + Lua-guarded release)
 ├── utils/                    # env validation, logger
-└── workers/                   # Background worker scaffold (not yet implemented)
+└── workers/                   # completion.worker.ts — sweeps abandoned uploads (run separately, see below)
 
 drizzle/          # SQL migrations + schema snapshots
 docs/             # Architecture, API, design-pattern, and security docs
@@ -140,6 +149,8 @@ k8s/              # Kustomize manifests for base/dev/production
 | `bun run dev` | Start the service with file watching |
 | `bun run start` | Start the service (no watch) |
 | `bun run build` | Bundle to `dist/server.js` |
+| `bun run worker` | Run the stale-upload cleanup worker (separate long-running process, not started by the API) |
+| `bun run worker:dev` | Same, with file watching |
 | `bun run db:generate` | Generate a new Drizzle migration from schema changes |
 | `bun run db:push` | Push schema changes directly to the DB (dev) |
 | `bun run db:migrate` | Apply migrations via drizzle-kit |

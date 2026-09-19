@@ -3,21 +3,38 @@ import UploadController from "@/controllers/upload.controller";
 import UploadService from "@/services/upload.service";
 import UploadRepository from "@/repositories/upload.repository";
 import PartRepository from "@/repositories/part.repository";
+import EventRepository from "@/repositories/event.repository";
 import { S3StorageStrategy } from "@/strategies/s3.storage";
 import { getDb } from "@/clients/db.client";
-import { uploadDelay } from "@/middleware/uploadTestRate";
 import { type InitUploadRequestDto, type PartCompleteRequestDto } from "@/dtos/upload.dto";
 
 // Composition Root: Wire all dependencies
 const db = getDb();
 const uploadRepo = new UploadRepository(db);
 const partRepo = new PartRepository(db);
+const eventRepo = new EventRepository(db);
 const storage = new S3StorageStrategy();
-const uploadService = new UploadService(uploadRepo, partRepo, storage);
+const uploadService = new UploadService(uploadRepo, partRepo, storage, eventRepo);
 const uploadController = new UploadController(uploadService);
 
 export default new Elysia({ prefix: "/uploads" })
-  .onBeforeHandle(uploadDelay().beforeHandle)
+  .get("/", uploadController.listUploads, {
+    query: t.Object({
+      uploadedById: t.String({ minLength: 1 }),
+      tenantId: t.Optional(t.String()),
+      state: t.Optional(t.String()),
+    }),
+  })
+  .get("/:uploadId", uploadController.getStatus, {
+    params: t.Object({
+      uploadId: t.String({ format: "uuid" }),
+    }),
+  })
+  .get("/:uploadId/download", uploadController.getDownloadUrl, {
+    params: t.Object({
+      uploadId: t.String({ format: "uuid" }),
+    }),
+  })
   .post("/init", uploadController.initUpload, {
     body: t.Object({
       uploadId: t.Optional(t.String({ format: "uuid" })),
