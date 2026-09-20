@@ -6,6 +6,9 @@ import { S3StorageStrategy } from "@/strategies/s3.storage";
 import CompletionService from "@/services/completion.service";
 import { env } from "@/utils/env";
 import { logger } from "@/utils/logger";
+import { registerProcessErrorHandlers } from "@/utils/process-guards";
+
+registerProcessErrorHandlers("upload-service-worker");
 
 class CompletionWorker {
   private db = getDb();

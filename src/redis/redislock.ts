@@ -1,12 +1,14 @@
 import RedisClient from "@/clients/redis.client";
 import crypto from "crypto";
+import { ConflictError } from "@/utils/app-error";
 
 export const redisLock = async (key: string, fn: Function, ttl = 15000) => {
   const redis = RedisClient.getInstance();
   const token = crypto.randomUUID();
 
   const acquired = await redis.set(key, token, "PX", ttl, "NX");
-  if (!acquired) throw new Error("LOCK_NOT_ACQUIRED");
+  if (!acquired)
+    throw new ConflictError("This upload is already being processed, try again shortly");
 
   try {
     return await fn();

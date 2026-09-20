@@ -14,6 +14,7 @@ import { randomUUID } from "crypto";
 import { logger } from "@/utils/logger";
 import { env } from "@/utils/env";
 import { stagingKeyPrefix } from "@/utils/s3-keys";
+import { ConflictError, NotFoundError, ValidationError } from "@/utils/app-error";
 
 export default class UploadService {
   constructor(
@@ -29,7 +30,7 @@ export default class UploadService {
       const existing = await this.uploadRepo.getUpload(data.uploadId);
 
       if (!existing) {
-        throw new Error("UPLOAD_NOT_FOUND");
+        throw new NotFoundError("Upload not found");
       }
 
       // verify multipart upload still exists in S3
@@ -80,29 +81,29 @@ export default class UploadService {
 
     // 3️⃣ NEW UPLOAD PATH — validate against S3 hard limits and service policy
     if (data.size > env.MAX_UPLOAD_SIZE_BYTES) {
-      throw new Error(
-        `FILE_TOO_LARGE: size ${data.size} exceeds maximum of ${env.MAX_UPLOAD_SIZE_BYTES} bytes`
+      throw new ValidationError(
+        `File too large: size ${data.size} exceeds maximum of ${env.MAX_UPLOAD_SIZE_BYTES} bytes`
       );
     }
 
     if (env.ALLOWED_CONTENT_TYPES) {
       const allowed = env.ALLOWED_CONTENT_TYPES.split(",").map((t) => t.trim());
       if (!allowed.includes(data.contentType)) {
-        throw new Error(`CONTENT_TYPE_NOT_ALLOWED: ${data.contentType}`);
+        throw new ValidationError(`Content type not allowed: ${data.contentType}`);
       }
     }
 
     const totalParts = Math.ceil(data.size / data.chunkSize);
 
     if (totalParts > env.MAX_PARTS) {
-      throw new Error(
-        `TOO_MANY_PARTS: ${totalParts} parts exceeds S3's limit of ${env.MAX_PARTS}; increase chunkSize`
+      throw new ValidationError(
+        `Too many parts: ${totalParts} parts exceeds S3's limit of ${env.MAX_PARTS}; increase chunkSize`
       );
     }
 
     if (totalParts > 1 && data.chunkSize < env.MIN_PART_SIZE_BYTES) {
-      throw new Error(
-        `CHUNK_SIZE_TOO_SMALL: chunkSize must be at least ${env.MIN_PART_SIZE_BYTES} bytes for multi-part uploads`
+      throw new ValidationError(
+        `Chunk size too small: chunkSize must be at least ${env.MIN_PART_SIZE_BYTES} bytes for multi-part uploads`
       );
     }
 
@@ -168,18 +169,18 @@ export default class UploadService {
     const partNumber = Number(data.partNumber);
 
     if (!partNumber || partNumber < 1) {
-      throw new Error("Invalid part number");
+      throw new ValidationError("Invalid part number");
     }
 
     // 1️⃣ Fetch upload from DB
     const upload = await this.uploadRepo.getUpload(uploadId);
-    if (!upload) throw new Error("Upload not found");
+    if (!upload) throw new NotFoundError("Upload not found");
 
-    if (!upload.s3UploadId) throw new Error("Upload missing S3 UploadId");
+    if (!upload.s3UploadId) throw new ConflictError("Upload missing S3 UploadId");
 
     // Validate part number
     if (partNumber > upload.totalParts) {
-      throw new Error("Part number exceeds totalParts");
+      throw new ValidationError("Part number exceeds totalParts");
     }
 
     const key = `${upload.s3KeyPrefix}${upload.filename}`;
@@ -207,8 +208,8 @@ export default class UploadService {
     data: PartCompleteRequestDto
   ): Promise<PartCompleteResponseDto & { autoCompleted: boolean }> {
     const upload = await this.uploadRepo.getUpload(uploadId);
-    if (!upload) throw new Error("Upload not found");
-    if (!upload.s3UploadId) throw new Error("Upload missing S3 UploadId");
+    if (!upload) throw new NotFoundError("Upload not found");
+    if (!upload.s3UploadId) throw new ConflictError("Upload missing S3 UploadId");
 
     const key = `${upload.s3KeyPrefix}${upload.filename}`;
 
@@ -221,11 +222,11 @@ export default class UploadService {
     });
 
     if (!verified) {
-      throw new Error(`PART_NOT_FOUND_IN_S3: part ${data.PartNumber} was not found on S3`);
+      throw new NotFoundError(`Part ${data.PartNumber} was not found on S3`);
     }
 
     if (verified.etag !== data.ETag) {
-      throw new Error(`ETAG_MISMATCH: reported ETag does not match the part S3 actually received`);
+      throw new ConflictError("Reported ETag does not match the part S3 actually received");
     }
 
     await this.partRepo.savePart(uploadId, data.PartNumber, verified.etag, verified.size);
@@ -265,7 +266,7 @@ export default class UploadService {
     return redisLock(`upload:${uploadId}:complete`, async () => {
       // 1️⃣ Fetch upload record
       const upload = await this.uploadRepo.getUpload(uploadId);
-      if (!upload) throw new Error("Upload not found");
+      if (!upload) throw new NotFoundError("Upload not found");
 
       // Idempotent: auto-complete (from the last part) and an explicit client
       // call can race — a second call just returns the current processing state
@@ -290,23 +291,25 @@ export default class UploadService {
       }
 
       if (upload.state === "VALIDATION_FAILED") {
-        throw new Error(`UPLOAD_VALIDATION_FAILED: ${upload.lastError ?? "file was rejected"}`);
+        throw new ConflictError(
+          `Upload validation failed: ${upload.lastError ?? "file was rejected"}`
+        );
       }
 
       if (!upload.s3UploadId) {
-        throw new Error("S3 uploadId missing — cannot complete multipart upload");
+        throw new ConflictError("S3 uploadId missing — cannot complete multipart upload");
       }
 
       // 2️⃣ Fetch all parts from DB
       const parts = await this.partRepo.listParts(uploadId);
 
       if (parts.length === 0) {
-        throw new Error("No uploaded parts found");
+        throw new ConflictError("No uploaded parts found");
       }
 
       // 3️⃣ Validate number of parts
       if (parts.length !== upload.totalParts) {
-        throw new Error(
+        throw new ConflictError(
           `Upload incomplete: expected ${upload.totalParts}, but only ${parts.length} parts uploaded`
         );
       }
@@ -314,8 +317,8 @@ export default class UploadService {
       // 3️⃣.5 Validate total uploaded bytes match the declared file size
       const totalUploadedSize = parts.reduce((sum, p) => sum + (p.size ?? 0), 0);
       if (totalUploadedSize !== upload.size) {
-        throw new Error(
-          `SIZE_MISMATCH: expected ${upload.size} bytes but uploaded parts total ${totalUploadedSize} bytes`
+        throw new ConflictError(
+          `Size mismatch: expected ${upload.size} bytes but uploaded parts total ${totalUploadedSize} bytes`
         );
       }
 
@@ -432,7 +435,7 @@ export default class UploadService {
 
   async getStatus(uploadId: string) {
     const upload = await this.uploadRepo.getUpload(uploadId);
-    if (!upload) throw new Error("Upload not found");
+    if (!upload) throw new NotFoundError("Upload not found");
 
     const parts = await this.partRepo.listParts(uploadId);
 
@@ -458,12 +461,10 @@ export default class UploadService {
 
   async getDownloadUrl(uploadId: string) {
     const upload = await this.uploadRepo.getUpload(uploadId);
-    if (!upload) throw new Error("Upload not found");
+    if (!upload) throw new NotFoundError("Upload not found");
 
     if (upload.state !== "COMPLETED" || !upload.finalS3Key) {
-      throw new Error(
-        "UPLOAD_NOT_COMPLETED: cannot download a file that hasn't finished uploading"
-      );
+      throw new ConflictError("Cannot download a file that hasn't finished uploading");
     }
 
     return this.storage.presignGetObject({ bucket: upload.s3Bucket, key: upload.finalS3Key });

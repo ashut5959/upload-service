@@ -15,8 +15,11 @@ import {
   globalErrorHandler,
 } from "@/middleware";
 import { closeDb, getDb } from "@/clients/db.client";
+import { registerProcessErrorHandlers } from "@/utils/process-guards";
 import cookie from "@elysiajs/cookie";
 import cors from "@elysiajs/cors";
+
+registerProcessErrorHandlers("upload-service-http");
 
 const app = new Elysia()
   .use(
@@ -32,6 +35,7 @@ const app = new Elysia()
     start: 0,
     requestId: "",
   })
+  .onBeforeHandle(requestIdMiddleware())
   .onBeforeHandle(bodyLimit(1024 * 1024).before)
   // .onBeforeHandle(rateLimiter(100, 1000).before)
   .onBeforeHandle(sanitizer.before)
@@ -49,15 +53,6 @@ const app = new Elysia()
     });
 
     requestLogger.after(ctx);
-  })
-
-  .onError(({ error, request }) => {
-    logger.error({ err: error, url: request.url }, "Unhandled error in Upload Service");
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      status: "error",
-      message: env.NODE_ENV === "production" ? "Internal Server Error" : message,
-    };
   })
 
   // Health

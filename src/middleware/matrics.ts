@@ -15,6 +15,12 @@ export const httpRequestDuration = new Histogram({
   buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 0.5, 1, 2],
 });
 
+export const httpErrorsCounter = new Counter({
+  name: "http_errors_total",
+  help: "Total number of HTTP error responses",
+  labelNames: ["method", "route", "status"],
+});
+
 export const metricsRecorder = {
   after: (ctx: any) => {
     const route = ctx.route ?? ctx.path;

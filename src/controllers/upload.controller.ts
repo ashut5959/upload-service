@@ -1,37 +1,38 @@
 import type UploadService from "@/services/upload.service";
+import { catchAsync } from "@/utils/catch-async";
 
 export default class UploadController {
   constructor(private uploadService: UploadService) {}
 
-  initUpload = async ({ body }: { body: any }) => {
+  initUpload = catchAsync(async ({ body }: { body: any }) => {
     return this.uploadService.initUpload(body);
-  };
+  });
 
-  presignPart = async ({ params, body }: { params: any; body: any }) => {
+  presignPart = catchAsync(async ({ params, body }: { params: any; body: any }) => {
     return this.uploadService.presignPart(params.uploadId, body);
-  };
+  });
 
-  partComplete = async ({ params, body }: { params: any; body: any }) => {
+  partComplete = catchAsync(async ({ params, body }: { params: any; body: any }) => {
     return this.uploadService.partComplete(params.uploadId, body);
-  };
+  });
 
-  completeUpload = async ({ params }: { params: any }) => {
+  completeUpload = catchAsync(async ({ params }: { params: any }) => {
     return this.uploadService.completeUpload(params.uploadId);
-  };
+  });
 
-  cancelUpload = async ({ params }: { params: any }) => {
+  cancelUpload = catchAsync(async ({ params }: { params: any }) => {
     return this.uploadService.cancelUpload(params.uploadId);
-  };
+  });
 
-  getStatus = async ({ params }: { params: any }) => {
+  getStatus = catchAsync(async ({ params }: { params: any }) => {
     return this.uploadService.getStatus(params.uploadId);
-  };
+  });
 
-  listUploads = async ({ query }: { query: any }) => {
+  listUploads = catchAsync(async ({ query }: { query: any }) => {
     return this.uploadService.listUploads(query);
-  };
+  });
 
-  getDownloadUrl = async ({ params }: { params: any }) => {
+  getDownloadUrl = catchAsync(async ({ params }: { params: any }) => {
     return this.uploadService.getDownloadUrl(params.uploadId);
-  };
+  });
 }
