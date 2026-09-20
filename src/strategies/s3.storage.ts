@@ -155,22 +155,37 @@ export class S3StorageStrategy implements StorageStrategy {
     uploadId: string;
     partNumber: number;
   }): Promise<{ etag: string; size: number } | null> {
-    const cmd = new ListPartsCommand({
-      Bucket: data.bucket,
-      Key: data.key,
-      UploadId: data.uploadId,
-      PartNumberMarker: String(data.partNumber - 1),
-      MaxParts: 1,
-    });
+    // Deliberately not using PartNumberMarker to fetch "just this one part": AWS S3
+    // treats it as exclusive (marker N -> first result is N+1), but SeaweedFS treats
+    // it as inclusive (marker N -> first result is N if present), so an offset trick
+    // tuned for one backend silently fetches the wrong part on the other. Instead,
+    // list a full page and scan it for an exact PartNumber match, which is correct
+    // regardless of which convention the backend uses. Paginate in the rare case a
+    // huge part count doesn't fit in one page.
+    let partNumberMarker: string | undefined;
 
-    const response = await this.s3.send(cmd);
-    const part = response.Parts?.[0];
+    while (true) {
+      const cmd = new ListPartsCommand({
+        Bucket: data.bucket,
+        Key: data.key,
+        UploadId: data.uploadId,
+        PartNumberMarker: partNumberMarker,
+        MaxParts: 1000,
+      });
 
-    if (!part || part.PartNumber !== data.partNumber || !part.ETag) {
-      return null;
+      const response = await this.s3.send(cmd);
+      const part = response.Parts?.find((p) => p.PartNumber === data.partNumber);
+
+      if (part && part.ETag) {
+        return { etag: part.ETag, size: part.Size ?? 0 };
+      }
+
+      if (!response.IsTruncated || !response.NextPartNumberMarker) {
+        return null;
+      }
+
+      partNumberMarker = response.NextPartNumberMarker;
     }
-
-    return { etag: part.ETag, size: part.Size ?? 0 };
   }
 
   async presignGetObject(data: { bucket: string; key: string }): Promise<{ url: string }> {

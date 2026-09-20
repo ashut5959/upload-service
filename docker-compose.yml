@@ -13,7 +13,11 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+ expects the volume mounted at the parent directory, not
+      # /var/lib/postgresql/data directly — it manages a major-version-namespaced
+      # subdirectory underneath itself (pg_ctlcluster-style), and refuses to start
+      # against a directly-mounted .../data path even on a fresh, empty volume.
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -144,35 +148,102 @@ services:
       - dev # Only start with --profile dev
 
   # -----------------------------------------------------
-  # 🪣 MinIO (S3-Compatible Object Storage)
+  # 🌱 SeaweedFS (Distributed, S3-compatible object storage)
   # -----------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: upload_minio
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-      MINIO_SERVER_URL: http://localhost:9000 # External URL for presigned URLs
+  # No license required (Apache 2.0). Topology: one master (coordinates
+  # topology/metadata), three volume servers (actual data, spread across
+  # them by the master), one filer (POSIX-like layer the S3 gateway sits on),
+  # one s3 gateway (the API our app actually talks to).
+  seaweedfs-master:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_master
+    hostname: seaweedfs-master
+    command: "master -ip=seaweedfs-master -ip.bind=0.0.0.0 -mdir=/data"
     volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      - seaweedfs_master_data:/data
+    ports:
+      - "9333:9333" # Master UI — cluster topology, volumes, replication status
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 1G
-        reservations:
-          memory: 512M
+    networks:
+      - backend
+
+  seaweedfs-volume1:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_volume1
+    hostname: seaweedfs-volume1
+    command: "volume -ip=seaweedfs-volume1 -mserver=seaweedfs-master:9333 -ip.bind=0.0.0.0 -port=8080 -dir=/data"
+    volumes:
+      - seaweedfs_volume1_data:/data
+    depends_on:
+      - seaweedfs-master
+    restart: unless-stopped
+    networks:
+      - backend
+
+  seaweedfs-volume2:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_volume2
+    hostname: seaweedfs-volume2
+    command: "volume -ip=seaweedfs-volume2 -mserver=seaweedfs-master:9333 -ip.bind=0.0.0.0 -port=8080 -dir=/data"
+    volumes:
+      - seaweedfs_volume2_data:/data
+    depends_on:
+      - seaweedfs-master
+    restart: unless-stopped
+    networks:
+      - backend
+
+  seaweedfs-volume3:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_volume3
+    hostname: seaweedfs-volume3
+    command: "volume -ip=seaweedfs-volume3 -mserver=seaweedfs-master:9333 -ip.bind=0.0.0.0 -port=8080 -dir=/data"
+    volumes:
+      - seaweedfs_volume3_data:/data
+    depends_on:
+      - seaweedfs-master
+    restart: unless-stopped
+    networks:
+      - backend
+
+  seaweedfs-filer:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_filer
+    hostname: seaweedfs-filer
+    command: "filer -ip=seaweedfs-filer -master=seaweedfs-master:9333 -ip.bind=0.0.0.0 -defaultStoreDir=/data"
+    volumes:
+      - seaweedfs_filer_data:/data
+    ports:
+      - "8888:8888" # Filer UI — browse buckets/files directly
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume1
+      - seaweedfs-volume2
+      - seaweedfs-volume3
+    restart: unless-stopped
+    networks:
+      - backend
+
+  seaweedfs-s3:
+    image: chrislusf/seaweedfs:latest
+    container_name: upload_seaweedfs_s3
+    hostname: seaweedfs-s3
+    command: "s3 -filer=seaweedfs-filer:8888 -ip.bind=0.0.0.0 -port=8333"
+    environment:
+      # Read directly by the S3 gateway as the single-credential auth pair —
+      # kept as minioadmin/minioadmin to match S3_ACCESS_KEY/S3_SECRET_KEY
+      # already used everywhere else in this file, so no app env changes needed.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      - "8333:8333"
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume1
+      - seaweedfs-volume2
+      - seaweedfs-volume3
+      - seaweedfs-filer
+    restart: unless-stopped
     networks:
       - backend
 
@@ -257,7 +328,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgres://postgres:password@postgres:5432/upload_service
       REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://minio:9000 # Internal Docker network
+      S3_ENDPOINT: http://seaweedfs-s3:8333 # Internal Docker network
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: uploads
@@ -301,11 +372,13 @@ services:
       # 🔴 Redis
       REDIS_URL: redis://redis:6379
 
-      # 🪣 MinIO (S3 compatible)
-      S3_ENDPOINT: http://minio:9000
+      # 🌱 SeaweedFS (S3 compatible)
+      S3_ENDPOINT: http://seaweedfs-s3:8333
+      S3_PUBLIC_ENDPOINT: http://localhost:8333
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: uploads
+      S3_STAGING_BUCKET: uploads-staging
       S3_REGION: us-east-1
 
       # 🟡 Elasticsearch
@@ -320,8 +393,8 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      seaweedfs-s3:
+        condition: service_started
       elasticsearch:
         condition: service_healthy
     restart: unless-stopped
@@ -359,7 +432,15 @@ volumes:
     driver: local
   redisinsight_data:
     driver: local
-  minio_data:
+  seaweedfs_master_data:
+    driver: local
+  seaweedfs_volume1_data:
+    driver: local
+  seaweedfs_volume2_data:
+    driver: local
+  seaweedfs_volume3_data:
+    driver: local
+  seaweedfs_filer_data:
     driver: local
   elastic_data:
     driver: local
